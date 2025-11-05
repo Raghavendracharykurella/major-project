@@ -1,0 +1,215 @@
+import shutil
+import tkinter as tk
+from tkinter import filedialog
+import os
+import re
+import cv2
+from cvzone.HandTrackingModule import HandDetector
+import numpy as np
+import speech_recognition as sr  # Import speech recognition library
+
+width, height = 1920, 1080  # Full HD resolution for slide interaction
+
+# Function to ask the user to select a folder using tkinter file dialog
+def select_folder():
+    root = tk.Tk()
+    root.withdraw()  # Hide the main window
+    folder_path = filedialog.askdirectory(title="Select Folder")
+    if folder_path:
+        return folder_path
+    else:
+        print("Folder selection cancelled.")
+        return None
+
+# Get the folder path selected by the user
+selected_folder = select_folder()
+
+def rename_png_files(folder_path):
+    # Get a list of PNG files in the folder
+    png_files = [file for file in os.listdir(folder_path) if file.endswith('.png')]
+    # Sort the PNG files
+    png_files.sort()
+    # Rename the files with sequential numbers
+    for index, old_name in enumerate(png_files, start=1):
+        new_name = f"{index}.png"
+        old_path = os.path.join(folder_path, old_name)
+        new_path = os.path.join(folder_path, new_name)
+        os.rename(old_path, new_path)
+        print(f"Renamed: {old_name} -> {new_name}")
+
+if selected_folder:
+    # Call your function with the selected folder path
+    rename_png_files(selected_folder)
+
+# Camera setup
+cap = cv2.VideoCapture(0)
+cap.set(3, width)
+cap.set(4, height)
+
+# Image list
+pattern = r"(\d+)"  # Regular expression pattern to extract numeric part
+pathImages = sorted(os.listdir(selected_folder), key=lambda x: int(re.findall(pattern, x)[0]))
+
+# Variables
+imgno = 0
+gestureThreshold = 300
+buttonPressed = False
+buttoncounter = 0
+buttondelay = 15
+annotations = [[]]
+annotationNo = 0
+annotationstart = False
+
+# Hand detector with improved accuracy
+det = HandDetector(detectionCon=0.95, maxHands=1)  # Increased detectionCon for higher accuracy
+
+# Initialize speech recognizer
+r = sr.Recognizer()
+
+def recognize_speech():
+    with sr.Microphone() as source:
+        print("Listening for command...")
+        try:
+            audio = r.listen(source, timeout=5)  # Increased timeout to 5 seconds for better recognition
+            command = r.recognize_google(audio).lower()
+            print("Recognized: ", command)
+            return command
+        except (sr.UnknownValueError, sr.RequestError):
+            print("Speech recognition failed or could not understand.")
+            return None
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return None
+
+while True:
+    # Capture the webcam feed
+    success, img = cap.read()
+    img = cv2.flip(img, 1)
+
+    # Get the full image path
+    pathFullimage = os.path.join(selected_folder, pathImages[imgno])
+    imgcurr = cv2.imread(pathFullimage)
+
+    # Detect hands
+    hands, img = det.findHands(img)
+
+    # Draw gesture threshold line
+    cv2.line(imgcurr, (0, gestureThreshold), (width, gestureThreshold), (0, 255, 0), 10)
+
+    # Detect hands and handle gestures
+    if hands and buttonPressed is False:
+        hand = hands[0]
+        fingers = det.fingersUp(hand)
+        cx, cy = hand['center']
+        lmList = hand['lmList']
+
+        # Constrain values for easier drawing
+        xVal = int(np.interp(lmList[8][0], [0, width], [0, width]))
+        yVal = int(np.interp(lmList[8][1], [0, height], [0, height]))
+        indexFinger = xVal, yVal
+
+        # Gesture recognition
+        if cy <= gestureThreshold:  # if hand is at the height of the face
+            annotationstart = False
+
+            # Left gesture
+            if fingers == [1, 0, 0, 0, 0]:
+                annotationstart = False
+                print("left")
+                if imgno > 0:
+                    buttonPressed = True
+                    annotations = [[]]
+                    annotationNo = 0
+                    imgno -= 1
+
+            # Right gesture
+            if fingers == [0, 0, 0, 0, 0]:
+                annotationstart = False
+                print("right")
+                if imgno < len(pathImages) - 1:
+                    buttonPressed = True
+                    annotations = [[]]
+                    annotationNo = 0
+                    imgno += 1
+
+            # Exit gesture
+            if fingers == [1, 1, 0, 0, 1]:
+                print("Exit gesture detected. Closing application.")
+                cap.release()  # Release the camera resource
+                cv2.destroyAllWindows()  # Close all OpenCV windows
+                os._exit(0)  # Forcefully exit the program
+
+            # Speech activation gesture (Index, middle, and ring fingers raised)
+            if fingers == [0, 1, 1, 1, 0]:  # Index, middle, and ring fingers raised
+                print("Activating speech recognition...")
+                command = recognize_speech()  # Capture speech command
+                if command:
+                    print(f"Command received: {command}")
+                    if "next" in command and imgno < len(pathImages) - 1:
+                        imgno += 1
+                    elif "previous" in command and imgno > 0:
+                        imgno -= 1
+                    elif "remove" in command and annotations:
+                        annotations.pop(-1)
+                        annotationNo -= 1
+                    elif "exit" in command:
+                        print("Exiting program based on speech command.")
+                        break
+
+        # Show pointer
+        if fingers == [0, 1, 1, 0, 0]:
+            cv2.circle(imgcurr, indexFinger, 8, (0, 0, 255), cv2.FILLED)
+            annotationstart = False
+
+        # Draw pointer
+        if fingers == [0, 1, 0, 0, 0]:
+            if annotationstart is False:
+                annotationstart = True
+                annotationNo += 1
+                annotations.append([])
+
+            cv2.circle(imgcurr, indexFinger, 12, (0, 0, 255), cv2.FILLED)
+            annotations[annotationNo].append(indexFinger)
+        else:
+            annotationstart = False
+
+        # Erase gesture (index and middle finger)
+        if fingers == [0, 1, 1, 0, 0]:
+            if annotations:
+                if annotationNo >= 0:
+                    annotations.pop(-1)
+                    annotationNo -= 1
+                    buttonPressed = True
+
+    # Button pressed iterations
+    if buttonPressed:
+        buttoncounter += 1
+        if buttoncounter > buttondelay:
+            buttoncounter = 0
+            buttonPressed = False
+
+    # Draw annotations
+    for i in range(len(annotations)):
+        for j in range(len(annotations[i])):
+            if j != 0:
+                cv2.line(imgcurr, annotations[i][j - 1], annotations[i][j], (0, 0, 200), 12)
+
+    # Resize webcam feed to a smaller size
+    webcam_height = int(height * 0.2)  # 20% of slide height
+    webcam_width = int(width * 0.2)  # Maintain aspect ratio
+    imgsmall = cv2.resize(img, (webcam_width, webcam_height))
+
+    # Place webcam feed at the bottom-right corner
+    imgcurr[-webcam_height:, -webcam_width:] = imgsmall
+
+    # Create a named window with resizable property
+    cv2.namedWindow("Image with Annotations", cv2.WINDOW_NORMAL)
+
+    # Show the slide with annotations and webcam feed
+    cv2.imshow("Image with Annotations", imgcurr)
+
+    key = cv2.waitKey(1)
+
+# Release camera and close windows
+cap.release()
+cv2.destroyAllWindows()
